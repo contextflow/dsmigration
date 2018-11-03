@@ -1,0 +1,4 @@
+*.swp
+dsmigration
+*.sqlite
+/example/example
