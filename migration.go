@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 
@@ -18,12 +19,135 @@ type Migration struct {
 	Down    string
 }
 
+var (
+	// ErrNoNewerVersion error
+	ErrNoNewerVersion = errors.New("No newer version")
+	// ErrNoOlderVersion error
+	ErrNoOlderVersion = errors.New("No older version")
+)
+
+var (
+	head = new(migNode)
+)
+
 // UpAll applies all migration to the database
 func UpAll(db *sql.DB, migs []Migration) error {
-	return UpTo(db, migs, 1<<31)
+	return UpTo(db, migs, 1<<62)
 }
 
+// Up one migration
+func Up(db *sql.DB, migs []Migration) error {
+	state, err := analyze(db, migs)
+	if err != nil {
+		return err
+	}
+	return up(db, &state)
+}
+
+func up(db *sql.DB, state *migState) error {
+	if state.cur.newer == nil {
+		return ErrNoNewerVersion
+	}
+
+	migration := state.cur.newer.migration
+
+	log.Printf("Up migration from version %d to version %d", state.cur.migration.Version, migration.Version)
+	h := hash(migration)
+	_ = h
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(migration.Up)
+	if err != nil {
+		tx.Rollback()
+		return errors.Wrapf(err, "Executing up migration %d", migration.Version)
+	}
+	_, err = tx.Exec(`
+				INSERT INTO migrations (version, hash)
+					VALUES (?,?)
+				`, migration.Version, h)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	tx.Commit()
+	state.cur = state.cur.newer
+	return nil
+}
+
+// Down one migration
+func Down(db *sql.DB, migs []Migration) error {
+	state, err := analyze(db, migs)
+	if err != nil {
+		return err
+	}
+	return down(db, &state)
+}
+func down(db *sql.DB, state *migState) error {
+	if state.cur.older == state.head {
+		return ErrNoOlderVersion
+	}
+
+	migration := state.cur.migration
+
+	log.Printf("Down Migration from version %d to version %d", migration.Version, state.cur.older.migration.Version)
+	h := hash(migration)
+	_ = h
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(migration.Down)
+	if err != nil {
+		tx.Rollback()
+		return errors.Wrapf(err, "Executing down migration %d", migration.Version)
+	}
+	_, err = tx.Exec(`
+			DELETE FROM migrations WHERE version = ?
+		`, migration.Version)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	tx.Commit()
+	state.cur = state.cur.older
+	return nil
+}
+
+// UpTo migrates until version
 func UpTo(db *sql.DB, migs []Migration, version int) error {
+	state, err := analyze(db, migs)
+	if err != nil {
+		return err
+	}
+	for {
+		if state.cur.migration.Version >= version {
+			break
+		}
+		err := up(db, &state)
+		if err == ErrNoNewerVersion {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type migNode struct {
+	migration Migration
+	older     *migNode
+	newer     *migNode
+}
+
+type migState struct {
+	head *migNode
+	cur  *migNode
+}
+
+func analyze(db *sql.DB, migs []Migration) (migState, error) {
 
 	sort.Slice(migs, func(i, j int) bool {
 		return migs[i].Version < migs[j].Version
@@ -31,47 +155,39 @@ func UpTo(db *sql.DB, migs []Migration, version int) error {
 
 	migInfos, err := migrations(db)
 	if err != nil {
-		return err
+		return migState{}, err
 	}
 
+	head := new(migNode)
+	current := head
+	node := head
+
 	for i, migration := range migs {
-		if migration.Version > version {
-			return nil
-		}
 		if i < len(migInfos) {
 			// check if versions and hashes match
 			migInfo := migInfos[i]
 			if migration.Version != migInfo.version {
-				return fmt.Errorf("Matching migration %d failed, expected migration %d next", migration.Version, migInfo.version)
+				return migState{}, fmt.Errorf("Matching migration %d failed, expected migration %d next", migration.Version, migInfo.version)
 			}
 			if hash(migration) != migInfo.hash {
-				return fmt.Errorf("Matching hash of migration %d failed, expected hash to bes \"%s\" not \"%s\"next", migration.Version, migInfo.hash, hash(migration))
+				return migState{}, fmt.Errorf("Matching hash of migration %d failed, expected hash to bes \"%s\" not \"%s\"next", migration.Version, migInfo.hash, hash(migration))
 			}
+			next := new(migNode)
+			next.older = node
+			node.newer = next
+			next.migration = migration
+			node = next
+			current = node
 		} else {
-			h := hash(migration)
-			_ = h
-			tx, err := db.Begin()
-			if err != nil {
-				return err
-			}
-			_, err = tx.Exec(migration.Up)
-			if err != nil {
-				tx.Rollback()
-				return errors.Wrapf(err, "Executing up migration %d", migration.Version)
-			}
-			_, err = tx.Exec(`
-				INSERT INTO migrations (version, hash)
-					VALUES (?,?)
-				`, migration.Version, h)
-			if err != nil {
-				tx.Rollback()
-				return err
-			}
-			tx.Commit()
+			next := new(migNode)
+			next.older = node
+			node.newer = next
+			next.migration = migration
+			node = next
 		}
 	}
 
-	return nil
+	return migState{head, current}, nil
 }
 
 type migrationInfo struct {
