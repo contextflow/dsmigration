@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"sort"
 	"strconv"
 
@@ -24,10 +23,8 @@ var (
 	ErrNoNewerVersion = errors.New("No newer version")
 	// ErrNoOlderVersion error
 	ErrNoOlderVersion = errors.New("No older version")
-)
-
-var (
-	head = new(migNode)
+	// ErrNoVersionFound  error
+	ErrNoVersionFound = errors.New("No version found")
 )
 
 // UpAll applies all migration to the database
@@ -51,7 +48,7 @@ func up(db *sql.DB, state *migState) error {
 
 	migration := state.cur.newer.migration
 
-	log.Printf("Up migration from version %d to version %d", state.cur.migration.Version, migration.Version)
+	Logger.Printf("Up migration from version %d to version %d", state.cur.migration.Version, migration.Version)
 	h := hash(migration)
 	_ = h
 	tx, err := db.Begin()
@@ -85,15 +82,13 @@ func Down(db *sql.DB, migs []Migration) error {
 	return down(db, &state)
 }
 func down(db *sql.DB, state *migState) error {
-	if state.cur.older == state.head {
+	if state.cur == state.head {
 		return ErrNoOlderVersion
 	}
 
 	migration := state.cur.migration
 
-	log.Printf("Down Migration from version %d to version %d", migration.Version, state.cur.older.migration.Version)
-	h := hash(migration)
-	_ = h
+	Logger.Printf("Down Migration from version %d to version %d", migration.Version, state.cur.older.migration.Version)
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -134,6 +129,23 @@ func UpTo(db *sql.DB, migs []Migration, version int) error {
 		}
 	}
 	return nil
+}
+
+// Version returns the latest installed migration version
+func Version(db *sql.DB) (int, error) {
+	rows, err := db.Query(`
+			SELECT version FROM migrations ORDER BY version DESC;
+		`)
+	defer rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	if !rows.Next() {
+		return 0, ErrNoVersionFound
+	}
+	var ver int
+	err = rows.Scan(&ver)
+	return ver, err
 }
 
 type migNode struct {
