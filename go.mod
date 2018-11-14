@@ -1,4 +1,4 @@
-module github.com/flicaflow/dsmigrate
+module github.com/contextflow/dsmigration
 
 require (
 	github.com/mattn/go-sqlite3 v1.10.0

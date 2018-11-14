@@ -1,4 +1,4 @@
-package dsmigrate
+package dsmigration
 
 import (
 	"database/sql"

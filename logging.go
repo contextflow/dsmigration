@@ -1,4 +1,4 @@
-package dsmigrate
+package dsmigration
 
 // LoggerInterface defines the logger interface
 // this matches the std go log package
